@@ -1,0 +1,61 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>VLESS test</title></head>
+<body>
+<h1>VLESS test (no secrets stored)</h1>
+<p>UUID: <input id="uuid" size="40"></p>
+<p>Host: <input id="host" size="40"></p>
+<p>Path: <input id="path" size="30"></p>
+<p><button id="run">Run test</button></p>
+<pre id="out">Ready.</pre>
+<script>
+function $(id){return document.getElementById(id);}
+function log(m){$('out').textContent+=m+'\n';}
+function uuidBytes(s){var h=s.replace(/-/g,'');var b=new Uint8Array(16);for(var i=0;i<16;i++){b[i]=parseInt(h.substr(i*2,2),16);}return b;}
+function concat(a){var n=0;for(var i=0;i<a.length;i++){n+=a[i].length;}var r=new Uint8Array(n);var o=0;for(var j=0;j<a.length;j++){r.set(a[j],o);o+=a[j].length;}return r;}
+function vlessHead(addr,port){
+  var u=uuidBytes($('uuid').value.trim());
+  var d=new TextEncoder().encode(addr);
+  var h=new Uint8Array(1+16+1+1+2+1+1+d.length);
+  var o=0;h[o++]=0;h.set(u,o);o+=16;h[o++]=0;h[o++]=1;h[o++]=(port>>8)&255;h[o++]=port&255;h[o++]=2;h[o++]=d.length;h.set(d,o);
+  return h;
+}
+function stripVless(buf){if(buf.length<2){return buf;}return buf.slice(2+buf[1]);}
+function httpDone(t){
+  var hi=t.indexOf('\r\n\r\n');
+  if(hi<0){return false;}
+  var head=t.slice(0,hi);
+  var m=head.match(/Content-Length: (\d+)/i);
+  if(m){return t.length>=hi+4+parseInt(m[1],10);}
+  if(head.toLowerCase().indexOf('transfer-encoding: chunked')>=0){return t.indexOf('\r\n0\r\n\r\n',hi)>=0;}
+  return true;
+}
+function testOnce(addr,port,req){
+  return new Promise(function(resolve,reject){
+    var ws=new WebSocket('wss://'+$('host').value.trim()+$('path').value.trim());
+    ws.binaryType='arraybuffer';
+    var chunks=[];var done=false;
+    var timer=setTimeout(function(){if(!done){done=true;try{ws.close();}catch(e){}reject(new Error('timeout 25s, partial: '+new TextDecoder().decode(stripVless(concat(chunks)))));}},25000);
+    function finish(txt){if(done){return;}done=true;clearTimeout(timer);try{ws.close();}catch(e){}resolve(txt);}
+    ws.onopen=function(){log('WS open: '+addr);var h=vlessHead(addr,port);var p=new TextEncoder().encode(req);var b=new Uint8Array(h.length+p.length);b.set(h,0);b.set(p,h.length);ws.send(b);};
+    ws.onerror=function(){if(!done){done=true;clearTimeout(timer);reject(new Error('WebSocket error'));}};
+    ws.onclose=function(){if(!done){finish(new TextDecoder().decode(stripVless(concat(chunks))));}};
+    ws.onmessage=function(ev){chunks.push(new Uint8Array(ev.data));var t=new TextDecoder().decode(stripVless(concat(chunks)));if(httpDone(t)){finish(t);}};
+  });
+}
+$('run').onclick=function(){
+  $('out').textContent='';
+  (async function(){
+    try{
+      log('== 1. generate_204 via VLESS ==');
+      var r1=await testOnce('www.gstatic.com',80,'GET /generate_204 HTTP/1.1\r\nHost: www.gstatic.com\r\nConnection: close\r\n\r\n');
+      log('status line: '+r1.split('\r\n')[0]);
+      log('== 2. ip-api.com/json via VLESS ==');
+      var r2=await testOnce('ip-api.com',80,'GET /json/?fields=status,query,country,city,isp,as HTTP/1.1\r\nHost: ip-api.com\r\nConnection: close\r\n\r\n');
+      var j=r2.slice(r2.indexOf('\r\n\r\n')+4);
+      log(j);
+      log('DONE');
+    }catch(e){log('FAILED: '+e.message);}
+  })();
+};
+</script>
+</body></html>
